@@ -8,6 +8,7 @@ use Osana\Challenge\Services\GitHub\GitHubUsersRepository;
 use Osana\Challenge\Services\Local\LocalUsersRepository;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
+use Tightenco\Collect\Support\Collection;
 
 class FindUsersController
 {
@@ -16,6 +17,53 @@ class FindUsersController
 
     /** @var GitHubUsersRepository */
     private $gitHubUsersRepository;
+
+    const DIVIDER = 2;
+
+
+    private function getUsersRepository(string $query, int $limit): Collection
+    {
+        $limitGet = ceil($limit/self::DIVIDER);
+        $login = new Login($query);
+
+        $githubUsers = $this->gitHubUsersRepository->findByLogin($login, $limit);
+        $usersGithubCount = $githubUsers->count();
+    
+        $localUsers = $this->localUsersRepository->findByLogin($login, $limit);
+        $usersLocalCount = $localUsers->count();
+
+        //Se calcula $limitGetLocal dando prioridad al repositorio Local en caso que 
+        //el repositorio de Github no cubra el 50% del limite solicitado
+        $limitGetLocal =  $usersGithubCount < $limitGet ? $limit - $usersGithubCount : $limitGet;
+        $localUsers = $localUsers->slice(0, $limitGetLocal);
+
+        
+        $users = $localUsers->merge($githubUsers->slice(0, $limitGet));
+        $usersCount = $users->count();
+
+        if( $usersCount < $limit){
+            if($limitGetLocal === $limitGet){
+                $limitGetGithub = $limit - $localUsers->count();
+                $users = $localUsers->merge($githubUsers->slice(0, $limitGetGithub));
+            }
+        }       
+        
+
+        $users = $users->map(function (User $user) {
+            return [
+                'id' => $user->getId()->getValue(),
+                'login' => $user->getLogin()->getValue(),
+                'type' => $user->getType()->getValue(),
+                'profile' => [
+                    'name' => $user->getProfile()->getName()->getValue(),
+                    'company' => $user->getProfile()->getCompany()->getValue(),
+                    'location' => $user->getProfile()->getLocation()->getValue(),
+                ]
+            ];
+        });
+
+        return $users;
+    }
 
     public function __construct(LocalUsersRepository $localUsersRepository, GitHubUsersRepository $gitHubUsersRepository)
     {
@@ -28,25 +76,9 @@ class FindUsersController
         $query = $request->getQueryParams()['q'] ?? '';
         $limit = $request->getQueryParams()['limit'] ?? 0;
 
-        $login = new Login($query);
-
         // FIXME: Se debe tener cuidado en la implementación
         // para que siga las notas del documento de requisitos
-        $localUsers = $this->localUsersRepository->findByLogin($login, $limit);
-        $githubUsers = $this->gitHubUsersRepository->findByLogin($login, $limit);
-
-        $users = $localUsers->merge($githubUsers)->map(function (User $user) {
-            return [
-                'id' => $user->getId()->getValue(),
-                'login' => $user->getLogin()->getValue(),
-                'type' => $user->getType()->getValue(),
-                'profile' => [
-                    'name' => $user->getProfile()->getName()->getValue(),
-                    'company' => $user->getProfile()->getCompany()->getValue(),
-                    'location' => $user->getProfile()->getLocation()->getValue(),
-                ]
-            ];
-        });
+        $users =  $this->getUsersRepository($query,$limit);
 
         $response->getBody()->write($users->toJson());
 
